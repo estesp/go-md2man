@@ -1,252 +1,271 @@
 package md2man
 
 import (
-	"bytes"
 	"fmt"
-	"html"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/russross/blackfriday"
 )
 
 type roffRenderer struct {
+	extensions   blackfriday.Extensions
 	ListCounters []int
+	firstHeader  bool
+	defineTerm   bool
+	inList       bool
 }
 
-// RoffRenderer creates a new blackfriday Renderer for generating roff documents
+const (
+	titleHeader      = ".TH "
+	topLevelHeader   = "\n\n.SH "
+	secondLevelHdr   = "\n.SH "
+	otherHeader      = "\n.SS "
+	crTag            = "\n"
+	emphTag          = "\\fI"
+	emphCloseTag     = "\\fP"
+	strongTag        = "\\fB"
+	strongCloseTag   = "\\fP"
+	breakTag         = "\n.br\n"
+	paraTag          = "\n.PP\n"
+	hruleTag         = "\n.ti 0\n\\l'\\n(.lu'\n"
+	linkTag          = "\n\\[la]"
+	linkCloseTag     = "\\[ra]"
+	codespanTag      = "\\fB\\fC"
+	codespanCloseTag = "\\fR"
+	codeTag          = "\n.PP\n.RS\n\n.nf\n"
+	codeCloseTag     = "\n.fi\n.RE\n"
+	quoteTag         = "\n.PP\n.RS\n"
+	quoteCloseTag    = "\n.RE\n"
+	listTag          = "\n.RS\n"
+	listCloseTag     = "\n.RE\n"
+	arglistTag       = "\n.TP\n"
+	tableStart       = "\n.TS\nallbox;\n"
+	tableEnd         = "\n.TE\n"
+	tableCellStart   = "\nT{\n"
+	tableCellEnd     = "\nT}\n"
+)
+
+// NewRoffRenderer creates a new blackfriday Renderer for generating roff documents
 // from markdown
-func RoffRenderer(flags int) blackfriday.Renderer {
-	return &roffRenderer{}
-}
+func NewRoffRenderer() *roffRenderer {
+	var extensions blackfriday.Extensions
 
-func (r *roffRenderer) GetFlags() int {
-	return 0
-}
-
-func (r *roffRenderer) TitleBlock(out *bytes.Buffer, text []byte) {
-	out.WriteString(".TH ")
-
-	splitText := bytes.Split(text, []byte("\n"))
-	for i, line := range splitText {
-		line = bytes.TrimPrefix(line, []byte("% "))
-		if i == 0 {
-			line = bytes.Replace(line, []byte("("), []byte("\" \""), 1)
-			line = bytes.Replace(line, []byte(")"), []byte("\" \""), 1)
-		}
-		line = append([]byte("\""), line...)
-		line = append(line, []byte("\" ")...)
-		out.Write(line)
+	extensions |= blackfriday.NoIntraEmphasis
+	extensions |= blackfriday.Tables
+	extensions |= blackfriday.FencedCode
+	extensions |= blackfriday.SpaceHeadings
+	extensions |= blackfriday.Footnotes
+	extensions |= blackfriday.Titleblock
+	extensions |= blackfriday.DefinitionLists
+	return &roffRenderer{
+		extensions: extensions,
 	}
-	out.WriteString("\n")
+}
 
+func (r *roffRenderer) GetExtensions() blackfriday.Extensions {
+	return r.extensions
+}
+
+func (r *roffRenderer) RenderHeader(w io.Writer, ast *blackfriday.Node) {
 	// disable hyphenation
-	out.WriteString(".nh\n")
-	// disable justification (adjust text to left margin only)
-	out.WriteString(".ad l\n")
+	io.WriteString(w, ".nh\n")
+	return
 }
 
-func (r *roffRenderer) BlockCode(out *bytes.Buffer, text []byte, lang string) {
-	out.WriteString("\n.PP\n.RS\n\n.nf\n")
-	escapeSpecialChars(out, text)
-	out.WriteString("\n.fi\n.RE\n")
+func (r *roffRenderer) RenderFooter(w io.Writer, ast *blackfriday.Node) {
+	return
 }
 
-func (r *roffRenderer) BlockQuote(out *bytes.Buffer, text []byte) {
-	out.WriteString("\n.PP\n.RS\n")
-	out.Write(text)
-	out.WriteString("\n.RE\n")
-}
+func (r *roffRenderer) RenderNode(w io.Writer, node *blackfriday.Node, entering bool) blackfriday.WalkStatus {
 
-func (r *roffRenderer) BlockHtml(out *bytes.Buffer, text []byte) { // nolint: golint
-	out.Write(text)
-}
-
-func (r *roffRenderer) Header(out *bytes.Buffer, text func() bool, level int, id string) {
-	marker := out.Len()
-
-	switch {
-	case marker == 0:
-		// This is the doc header
-		out.WriteString(".TH ")
-	case level == 1:
-		out.WriteString("\n\n.SH ")
-	case level == 2:
-		out.WriteString("\n.SH ")
-	default:
-		out.WriteString("\n.SS ")
-	}
-
-	if !text() {
-		out.Truncate(marker)
-		return
-	}
-}
-
-func (r *roffRenderer) HRule(out *bytes.Buffer) {
-	out.WriteString("\n.ti 0\n\\l'\\n(.lu'\n")
-}
-
-func (r *roffRenderer) List(out *bytes.Buffer, text func() bool, flags int) {
-	marker := out.Len()
-	r.ListCounters = append(r.ListCounters, 1)
-	out.WriteString("\n.RS\n")
-	if !text() {
-		out.Truncate(marker)
-		return
-	}
-	r.ListCounters = r.ListCounters[:len(r.ListCounters)-1]
-	out.WriteString("\n.RE\n")
-}
-
-func (r *roffRenderer) ListItem(out *bytes.Buffer, text []byte, flags int) {
-	if flags&blackfriday.LIST_TYPE_ORDERED != 0 {
-		out.WriteString(fmt.Sprintf(".IP \"%3d.\" 5\n", r.ListCounters[len(r.ListCounters)-1]))
-		r.ListCounters[len(r.ListCounters)-1]++
-	} else {
-		out.WriteString(".IP \\(bu 2\n")
-	}
-	out.Write(text)
-	out.WriteString("\n")
-}
-
-func (r *roffRenderer) Paragraph(out *bytes.Buffer, text func() bool) {
-	marker := out.Len()
-	out.WriteString("\n.PP\n")
-	if !text() {
-		out.Truncate(marker)
-		return
-	}
-	if marker != 0 {
-		out.WriteString("\n")
-	}
-}
-
-func (r *roffRenderer) Table(out *bytes.Buffer, header []byte, body []byte, columnData []int) {
-	out.WriteString("\n.TS\nallbox;\n")
-
-	maxDelims := 0
-	lines := strings.Split(strings.TrimRight(string(header), "\n")+"\n"+strings.TrimRight(string(body), "\n"), "\n")
-	for _, w := range lines {
-		curDelims := strings.Count(w, "\t")
-		if curDelims > maxDelims {
-			maxDelims = curDelims
+	switch node.Type {
+	case blackfriday.Text:
+		var (
+			start, end string
+		)
+		if node.Parent.Type == blackfriday.TableCell {
+			if len(node.Literal) > 30 {
+				start = tableCellStart
+				end = tableCellEnd
+			}
 		}
+		out(w, start)
+		escapeSpecialChars(w, node.Literal)
+		out(w, end)
+	case blackfriday.Softbreak:
+		out(w, crTag)
+	case blackfriday.Hardbreak:
+		out(w, breakTag)
+	case blackfriday.Emph:
+		if entering {
+			out(w, emphTag)
+		} else {
+			out(w, emphCloseTag)
+		}
+	case blackfriday.Strong:
+		if entering {
+			out(w, strongTag)
+		} else {
+			out(w, strongCloseTag)
+		}
+	case blackfriday.Link:
+		if entering {
+			out(w, linkTag+string(node.LinkData.Destination))
+		} else {
+			out(w, linkCloseTag)
+		}
+	case blackfriday.Image:
+		// ignore images
+		return blackfriday.SkipChildren
+	case blackfriday.Code:
+		out(w, codespanTag)
+		escapeSpecialChars(w, node.Literal)
+		out(w, codespanCloseTag)
+	case blackfriday.Document:
+		break
+	case blackfriday.Paragraph:
+		// roff .PP markers break lists
+		if r.inList {
+			return blackfriday.GoToNext
+		}
+		if entering {
+			out(w, paraTag)
+		} else {
+			out(w, crTag)
+		}
+	case blackfriday.BlockQuote:
+		if entering {
+			out(w, quoteTag)
+		} else {
+			out(w, quoteCloseTag)
+		}
+	case blackfriday.Heading:
+		if entering {
+			switch node.Level {
+			case 1:
+				if r.firstHeader == false {
+					out(w, titleHeader)
+					r.firstHeader = true
+					break
+				}
+				out(w, topLevelHeader)
+			case 2:
+				out(w, secondLevelHdr)
+			default:
+				out(w, otherHeader)
+			}
+		}
+	case blackfriday.HorizontalRule:
+		out(w, hruleTag)
+	case blackfriday.List:
+		openTag := listTag
+		closeTag := listCloseTag
+		if node.ListFlags&blackfriday.ListTypeDefinition != 0 {
+			// tags for definition lists handled within Item node
+			openTag = ""
+			closeTag = ""
+		}
+		if entering {
+			r.inList = true
+			if node.ListFlags&blackfriday.ListTypeOrdered != 0 {
+				r.ListCounters = append(r.ListCounters, 1)
+			}
+			out(w, openTag)
+		} else {
+			if node.ListFlags&blackfriday.ListTypeOrdered != 0 {
+				r.ListCounters = r.ListCounters[:len(r.ListCounters)-1]
+			}
+			out(w, closeTag)
+			r.inList = false
+		}
+	case blackfriday.Item:
+		if entering {
+			if node.ListFlags&blackfriday.ListTypeOrdered != 0 {
+				out(w, fmt.Sprintf(".IP \"%3d.\" 5\n", r.ListCounters[len(r.ListCounters)-1]))
+				r.ListCounters[len(r.ListCounters)-1]++
+			} else if node.ListFlags&blackfriday.ListTypeDefinition != 0 {
+				// state machine for handling terms and following definitions
+				// since blackfriday does not distinguish them properly, nor
+				// does it seperate them into separate lists as it should
+				if r.defineTerm == false {
+					out(w, arglistTag)
+					r.defineTerm = true
+				} else {
+					r.defineTerm = false
+				}
+			} else {
+				out(w, ".IP \\(bu 2\n")
+			}
+		} else {
+			out(w, "\n")
+		}
+	case blackfriday.CodeBlock:
+		out(w, codeTag)
+		escapeSpecialChars(w, node.Literal)
+		out(w, codeCloseTag)
+	case blackfriday.Table:
+		if entering {
+			out(w, tableStart)
+			//call walker to count cells (and rows?) so format section can be produced
+			columns := countColumns(node)
+			out(w, strings.Repeat("l ", columns)+"\n")
+			out(w, strings.Repeat("l ", columns)+".\n")
+		} else {
+			out(w, tableEnd)
+		}
+	case blackfriday.TableCell:
+		var (
+			start, end string
+		)
+		if node.IsHeader {
+			start = codespanTag
+			end = codespanCloseTag
+		}
+		if entering {
+			if node.Prev.Type == blackfriday.TableCell {
+				out(w, "\t"+start)
+			}
+		} else {
+			out(w, end)
+		}
+	case blackfriday.TableHead:
+	case blackfriday.TableBody:
+		// no action as cell entries do all the nroff formatting
+		return blackfriday.GoToNext
+	case blackfriday.TableRow:
+		out(w, "\n")
+	default:
+		fmt.Fprintf(os.Stderr, "WARNING: go-md2man does not handle node type "+node.Type.String())
 	}
-	out.Write([]byte(strings.Repeat("l ", maxDelims+1) + "\n"))
-	out.Write([]byte(strings.Repeat("l ", maxDelims+1) + ".\n"))
-	out.Write(header)
-	if len(header) > 0 {
-		out.Write([]byte("\n"))
-	}
 
-	out.Write(body)
-	out.WriteString("\n.TE\n")
+	return blackfriday.GoToNext
 }
 
-func (r *roffRenderer) TableRow(out *bytes.Buffer, text []byte) {
-	if out.Len() > 0 {
-		out.WriteString("\n")
-	}
-	out.Write(text)
+// because roff format requires knowing the column count before outputting any table
+// data we need to walk a table tree and count the columns
+func countColumns(node *blackfriday.Node) int {
+	var columns int
+
+	node.Walk(func(node *blackfriday.Node, entering bool) blackfriday.WalkStatus {
+		switch node.Type {
+		case blackfriday.TableRow:
+			if !entering {
+				return blackfriday.Terminate
+			}
+		case blackfriday.TableCell:
+			columns++
+		default:
+			return blackfriday.GoToNext
+		}
+		return blackfriday.Terminate
+	})
+	return columns
 }
 
-func (r *roffRenderer) TableHeaderCell(out *bytes.Buffer, text []byte, align int) {
-	if out.Len() > 0 {
-		out.WriteString("\t")
-	}
-	if len(text) == 0 {
-		text = []byte{' '}
-	}
-	out.Write([]byte("\\fB\\fC" + string(text) + "\\fR"))
-}
-
-func (r *roffRenderer) TableCell(out *bytes.Buffer, text []byte, align int) {
-	if out.Len() > 0 {
-		out.WriteString("\t")
-	}
-	if len(text) > 30 {
-		text = append([]byte("T{\n"), text...)
-		text = append(text, []byte("\nT}")...)
-	}
-	if len(text) == 0 {
-		text = []byte{' '}
-	}
-	out.Write(text)
-}
-
-func (r *roffRenderer) Footnotes(out *bytes.Buffer, text func() bool) {
-
-}
-
-func (r *roffRenderer) FootnoteItem(out *bytes.Buffer, name, text []byte, flags int) {
-
-}
-
-func (r *roffRenderer) AutoLink(out *bytes.Buffer, link []byte, kind int) {
-	out.WriteString("\n\\[la]")
-	out.Write(link)
-	out.WriteString("\\[ra]")
-}
-
-func (r *roffRenderer) CodeSpan(out *bytes.Buffer, text []byte) {
-	out.WriteString("\\fB\\fC")
-	escapeSpecialChars(out, text)
-	out.WriteString("\\fR")
-}
-
-func (r *roffRenderer) DoubleEmphasis(out *bytes.Buffer, text []byte) {
-	out.WriteString("\\fB")
-	out.Write(text)
-	out.WriteString("\\fP")
-}
-
-func (r *roffRenderer) Emphasis(out *bytes.Buffer, text []byte) {
-	out.WriteString("\\fI")
-	out.Write(text)
-	out.WriteString("\\fP")
-}
-
-func (r *roffRenderer) Image(out *bytes.Buffer, link []byte, title []byte, alt []byte) {
-}
-
-func (r *roffRenderer) LineBreak(out *bytes.Buffer) {
-	out.WriteString("\n.br\n")
-}
-
-func (r *roffRenderer) Link(out *bytes.Buffer, link []byte, title []byte, content []byte) {
-	out.Write(content)
-	r.AutoLink(out, link, 0)
-}
-
-func (r *roffRenderer) RawHtmlTag(out *bytes.Buffer, tag []byte) { // nolint: golint
-	out.Write(tag)
-}
-
-func (r *roffRenderer) TripleEmphasis(out *bytes.Buffer, text []byte) {
-	out.WriteString("\\s+2")
-	out.Write(text)
-	out.WriteString("\\s-2")
-}
-
-func (r *roffRenderer) StrikeThrough(out *bytes.Buffer, text []byte) {
-}
-
-func (r *roffRenderer) FootnoteRef(out *bytes.Buffer, ref []byte, id int) {
-
-}
-
-func (r *roffRenderer) Entity(out *bytes.Buffer, entity []byte) {
-	out.WriteString(html.UnescapeString(string(entity)))
-}
-
-func (r *roffRenderer) NormalText(out *bytes.Buffer, text []byte) {
-	escapeSpecialChars(out, text)
-}
-
-func (r *roffRenderer) DocumentHeader(out *bytes.Buffer) {
-}
-
-func (r *roffRenderer) DocumentFooter(out *bytes.Buffer) {
+func out(w io.Writer, output string) {
+	io.WriteString(w, output)
 }
 
 func needsBackslash(c byte) bool {
@@ -258,11 +277,11 @@ func needsBackslash(c byte) bool {
 	return false
 }
 
-func escapeSpecialChars(out *bytes.Buffer, text []byte) {
+func escapeSpecialChars(w io.Writer, text []byte) {
 	for i := 0; i < len(text); i++ {
 		// escape initial apostrophe or period
 		if len(text) >= 1 && (text[0] == '\'' || text[0] == '.') {
-			out.WriteString("\\&")
+			io.WriteString(w, "\\&")
 		}
 
 		// directly copy normal characters
@@ -272,14 +291,15 @@ func escapeSpecialChars(out *bytes.Buffer, text []byte) {
 			i++
 		}
 		if i > org {
-			out.Write(text[org:i])
+			w.Write(text[org:i])
 		}
 
 		// escape a character
 		if i >= len(text) {
 			break
 		}
-		out.WriteByte('\\')
-		out.WriteByte(text[i])
+
+		w.Write([]byte{'\\'})
+		w.Write([]byte{text[i]})
 	}
 }
